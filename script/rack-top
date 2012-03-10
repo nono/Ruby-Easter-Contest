@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+
+require "redis"
+require "json"
+
+
+class Stats
+  def initialize(redis)
+    @redis = redis
+  end
+
+  def nb_requests
+    return @nb_requests if @nb_requests
+    keys = @redis.keys "requests/*"
+    vals = keys.any? ? @redis.mget(*keys) : []
+    @nb_requests = vals.map(&:to_i).inject(0, :+)
+  end
+
+  def rate
+    "%.1f" % (nb_requests / 300.0)
+  end
+
+  def uniq_visitor
+    keys = @redis.keys "visitors/*"
+    keys.length
+  end
+
+  def hostnames
+    return @results if @results
+    @results = {}
+    data = Hash.new {|h,k| h[k] = Hash.new(0) }
+    keys = @redis.keys "hostnames/*"
+    keys.each do |k|
+      host = k.split('/')[1]
+      hash = @redis.hgetall k
+      hash.each {|k,v| data[host][k] += v.to_i }
+    end
+    data.each do |k,v|
+      @results[k] = { total: v.values.inject(0, :+), paths: v }
+    end
+    @results
+  end
+
+  def slow_requests
+    results = {}
+    counts = Hash.new(0)
+    hostnames.each do |host,paths|
+      paths[:paths].each do |k,v|
+        counts["#{host}#{k}"] += v
+      end
+    end
+    sums = Hash.new(0.0)
+    keys = @redis.keys "slows/*"
+    keys.each do |k|
+      hash = @redis.hgetall k
+      hash.each {|k,v| sums[k] += v.to_f }
+    end
+    reqs = sums.keys
+    avgs = Hash[ reqs.zip reqs.map { |k| sums[k] / counts[k] } ]
+    tops = sums.keys.sort_by {|k| -avgs[k] }[0,10]
+    Hash[ tops.zip tops.map {|k| avgs[k] } ]
+  end
+
+  def to_json
+    {
+      requests: nb_requests,
+      rate: rate,
+      uniq_visitor: uniq_visitor,
+      hostnames: hostnames,
+      slow_requests: slow_requests
+    }.to_json
+  end
+end
+
+
+puts Stats.new(Redis.connect).to_json
